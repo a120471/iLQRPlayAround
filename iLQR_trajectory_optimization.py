@@ -1,12 +1,10 @@
+from functools import partial
 import json
 
-from ilqr.cost import PathQRCost
-from ilqr.dynamics import BatchAutoDiffDynamics
-from ilqr import iLQR
+import jax.numpy as jnp
 from matplotlib import pyplot as plt
 import numpy as np
-import theano
-import theano.tensor as T
+from trajax import optimizers
 
 
 def load_trajectory_data(filepath):
@@ -21,20 +19,20 @@ def load_trajectory_data(filepath):
   return np.array(xs), np.array(us)
 
 
-# Since heading data maybe detected flipped. We did a preprocess here to flip
+# Since heading data maybe detected flipped, we did a preprocess here to flip
 # the heading by assuming heading should be continuous and more than 50% of
 # heading are detected correct.
 def preprocess_flip_heading(xs, us):
   N = len(xs)
   # Heading direction from input data
   data_dirs = np.c_[np.cos(xs[:, 2]), np.sin(xs[:, 2])]
-  # Indices that break the continuous rule.
+  # Indices that break the continuous assumption.
   data_discontinuous = np.sum(data_dirs[:-1] * data_dirs[1:], axis=1) < 0
   adj_flip_scalar = np.ones(N)
   adj_flip_scalar[1:][data_discontinuous] *= -1
   flip_scalar = np.cumprod(adj_flip_scalar)
-  # Reverse flip_scalar based on assumption 2: more than 50% of heading are
-  # detected correct.
+  # Reverse flip_scalar based on the 2nd assumption: more than 50% of heading
+  # are detected correct.
   if np.sum(flip_scalar) < 0:
     flip_scalar *= -1
   need_flip = flip_scalar < 0
@@ -45,105 +43,46 @@ def preprocess_flip_heading(xs, us):
   us[need_flip, 0] *= -1
 
 
-class TrajectoryOptimizationDynamics(BatchAutoDiffDynamics):
-  """Trajectory optimization auto-differentiated dynamics model."""
+# wrap to [-pi, pi]
+def angle_wrap(theta):
+  return (theta + np.pi) % (2 * np.pi) - np.pi
 
-  def __init__(self, dt_list):
-    """Init dynamics model.
 
-    Args:
-      dt_list: Time step list [s].
+def cost(xs_in, us_in, x, u, t_i):
+  Q = np.diag([10, 10, 20/3, 10/2])
+  R = 0.1 * np.diag([1, 1])
 
-    Note:
-      state: [pos_x, pos_y, sin(heading), cos(heading), velocity]
-      action: [acceleration, angular_velocity]
-      heading: 0 is pointing X+ axis and increasing clockwise.
-    """
-    def f(x, u, i):
-      pos_x = x[..., 0]
-      pos_y = x[..., 1]
-      sin_heading = x[..., 2]
-      cos_heading = x[..., 3]
-      heading = T.arctan2(sin_heading, cos_heading)
-      v = x[..., 4]
+  x_diff = x - xs_in[t_i]
+  # wrap heading to [-pi, pi]
+  x_diff = jnp.asarray([angle_wrap(x_diff[i]) if i == 2 else x_diff[i] for i in range(4)])
+  u_diff = u - us_in[t_i]
 
-      a = u[..., 0]
-      omega = u[..., 1]
+  return x_diff.T @ Q @ x_diff + u_diff.T @ R @ u_diff
 
-      t_index = T.cast(i[..., 0], 'int32')
-      dt = dt_list[t_index]
 
-      # A = [[1, 0, 0, dt * cos(heading)],
-      #      [0, 1, 0, dt * sin(heading)],
-      #      [0, 0, 1, 0]
-      #      [0, 0, 0, 1]]
-      # B = [[0, 0],
-      #      [0, 0],
-      #      [0, dt],
-      #      [dt, 0]]
-      next_pos_x = pos_x + dt * cos_heading * v
-      next_pos_y = pos_y + dt * sin_heading * v
-      next_heading = heading + dt * omega
-      next_v = v + dt * a
+def dynamics(x, u, t_i):
+  pos_x = x[0]  # pos_x
+  pos_y = x[1]  # pos_y
+  heading = x[2]  # heading
+  v = x[3]  # velocity
 
-      # Return next state: Ax + Bu
-      return T.stack([
-        next_pos_x,
-        next_pos_y,
-        T.sin(next_heading),
-        T.cos(next_heading),
-        next_v
-      ]).T
+  a = u[0]  # acceleration
+  omega = u[1]  # angular_velocity
 
-    super(TrajectoryOptimizationDynamics, self).__init__(f,
-                                                         state_size=5,
-                                                         action_size=2)
+  # A = [[1, 0, 0, dt * cos(heading)],
+  #      [0, 1, 0, dt * sin(heading)],
+  #      [0, 0, 1, 0]
+  #      [0, 0, 0, 1]]
+  # B = [[0, 0],
+  #      [0, 0],
+  #      [0, dt],
+  #      [dt, 0]]
+  next_pos_x = pos_x + dt[t_i] * jnp.cos(heading) * v
+  next_pos_y = pos_y + dt[t_i] * jnp.sin(heading) * v
+  next_heading = heading + dt[t_i] * omega
+  next_v = v + dt[t_i] * a
 
-  @classmethod
-  def augment_state(cls, state):
-    """Augments angular state into a non-angular state by replacing heading
-      with sin(heading) and cos(heading). In this case, it converts:
-      [x, y, heading, v] -> [x, y, sin(heading), cos(heading), v]
-
-    Args:
-      state: State vector [reduced_state_size].
-
-    Returns:
-      Augmented state size [state_size].
-    """
-    if state.ndim == 1:
-      x, y, heading, v = state
-    else:
-      x = state[..., 0].reshape(-1, 1)
-      y = state[..., 1].reshape(-1, 1)
-      heading = state[..., 2].reshape(-1, 1)
-      v = state[..., 3].reshape(-1, 1)
-
-    return np.hstack([x, y, np.sin(heading), np.cos(heading), v])
-
-  @classmethod
-  def reduce_state(cls, state):
-    """Reduces a non-angular state into an angular state by replacing
-      sin(heading) and cos(heading) with heading. In this case, it converts:
-      [x, y, sin(heading), cos(heading), v] -> [x, y, heading, v]
-
-    Args:
-      state: Augmented state vector [state_size].
-
-    Returns:
-      Reduced state size [reduced_state_size].
-    """
-    if state.ndim == 1:
-      x, y, sin_heading, cos_heading, v = state
-    else:
-      x = state[..., 0].reshape(-1, 1)
-      y = state[..., 1].reshape(-1, 1)
-      sin_heading = state[..., 2].reshape(-1, 1)
-      cos_heading = state[..., 3].reshape(-1, 1)
-      v = state[..., 4].reshape(-1, 1)
-
-    heading = np.arctan2(sin_heading, cos_heading)
-    return np.hstack([x, y, heading, v])
+  return jnp.array([next_pos_x, next_pos_y, next_heading, next_v])
 
 
 def plot_result(xs_in, us_in, xs_out, us_out):
@@ -225,21 +164,17 @@ def plot_result(xs_in, us_in, xs_out, us_out):
 if __name__ == '__main__':
   xs, us = load_trajectory_data('a_noisy_trajectory.json')
   preprocess_flip_heading(xs, us)
-  dt = theano.shared(np.ones(len(xs)) * 0.1)  # Discrete time-steps in seconds
+  dt = jnp.ones(len(xs)) * 0.1  # Discrete time-steps in seconds
 
   # Compile the dynamics.
-  dynamics = TrajectoryOptimizationDynamics(dt)
-  xs_in = dynamics.augment_state(xs)
-  us_in = us[:-1]
-  # Cost function
-  Q = np.diag([10, 10, 20/3, 20/3, 10/2])
-  R = 0.1 * np.diag([1, 1])
-  cost = PathQRCost(Q, R, xs_in, us_in)
+  xs_in = jnp.asarray(xs)
+  us_in = jnp.asarray(us[:-1])
   # iLQR optimization
-  ilqr = iLQR(dynamics, cost, len(us_in))
-  xs_out, us_out = ilqr.fit(xs_in[0], us_in)
-  xs_out = dynamics.reduce_state(xs_out)
+  xs_out, us_out, _, _, _, _, _ = optimizers.ilqr(
+      cost=partial(cost, xs_in, us_in),
+      dynamics=dynamics,
+      x0=xs_in[0],
+      U=us_in)
 
-  dt = dt.get_value()
   plot_result(xs, us[:-1], xs_out, us_out)
   print('Done')
