@@ -19,52 +19,46 @@ def load_trajectory_data(filepath):
   return np.array(xs), np.array(us)
 
 
-# Since heading data maybe detected flipped, we did a preprocess here to flip
-# the heading by assuming heading should be continuous and more than 50% of
-# heading are detected correct.
-def preprocess_flip_heading(xs, us):
-  N = len(xs)
-  # Heading direction from input data
-  data_dirs = np.c_[np.cos(xs[:, 2]), np.sin(xs[:, 2])]
-  # Indices that break the continuous assumption.
-  data_discontinuous = np.sum(data_dirs[:-1] * data_dirs[1:], axis=1) < 0
-  adj_flip_scalar = np.ones(N)
-  adj_flip_scalar[1:][data_discontinuous] *= -1
-  flip_scalar = np.cumprod(adj_flip_scalar)
-  # Reverse flip_scalar based on the 2nd assumption: more than 50% of heading
-  # are detected correct.
-  if np.sum(flip_scalar) < 0:
-    flip_scalar *= -1
-  need_flip = flip_scalar < 0
-  # Flip the heading and speed, -PI < heading < PI
-  xs[need_flip, 2] -= np.pi
-  xs[xs[:,2] < -np.pi, 2] += np.pi
-  xs[need_flip, 3] *= -1
-  us[need_flip, 0] *= -1
-
-
 # wrap to [-pi, pi]
 def angle_wrap(theta):
   return (theta + np.pi) % (2 * np.pi) - np.pi
 
 
-def cost(xs_in, us_in, x, u, t_i):
-  Q = np.diag([10, 10, 20/3, 10/2])
-  R = 0.1 * np.diag([1, 1])
-  assert x.shape[-1] == Q.shape[0]
-  assert u.shape[-1] == R.shape[0]
+# Since heading data maybe detected flipped, we did a preprocess here to flip
+# the heading by assuming heading should be continuous and more than 50% of
+# heading are detected correct.
+def preprocess_flip_heading(xs, us):
+  # Heading direction from input data
+  data_dirs = np.c_[np.cos(xs[:, 2]), np.sin(xs[:, 2])]
+  # Indices that break the continuous assumption (by checking the inner product
+  # of adjacent heading directions)
+  data_discontinuous = np.sum(data_dirs[:-1] * data_dirs[1:], axis=1) < 0
+  adj_flip_scalar = np.ones(len(xs))
+  adj_flip_scalar[1:][data_discontinuous] *= -1
+  flip_scalar = np.cumprod(adj_flip_scalar)
+  # Reverse flip_scalar based on the 2nd assumption: more than 50% of heading
+  # are detected correct
+  if np.sum(flip_scalar) < 0:
+    flip_scalar *= -1
+  need_flip = flip_scalar < 0
+  # Flip the heading, speed and acceleration
+  xs[need_flip, 2] = angle_wrap(xs[need_flip, 2] - np.pi)
+  xs[need_flip, 3] *= -1
+  us[need_flip, 0] *= -1
 
+
+def cost(Q, R, xs_in, us_in, x, u, t_i):
   x_diff = x - xs_in[t_i]
   # wrap heading to [-pi, pi]
-  x_diff = jnp.asarray([angle_wrap(x_diff[i]) if i == 2 else x_diff[i] for i in range(4)])
+  x_diff = x_diff.at[2].set(angle_wrap(x_diff[2]))
   u_diff = u - us_in[t_i]
 
   return x_diff.T @ Q @ x_diff + u_diff.T @ R @ u_diff
 
 
 def dynamics(dts, x, u, t_i):
-  pos_x = x[0]  # pos_x
-  pos_y = x[1]  # pos_y
+  # _ = x[0]  # pos_x
+  # _ = x[1]  # pos_y
   heading = x[2]  # heading
   v = x[3]  # velocity
 
@@ -79,12 +73,9 @@ def dynamics(dts, x, u, t_i):
   #      [0, 0],
   #      [0, dt],
   #      [dt, 0]]
-  next_pos_x = pos_x + dts[t_i] * jnp.cos(heading) * v
-  next_pos_y = pos_y + dts[t_i] * jnp.sin(heading) * v
-  next_heading = heading + dts[t_i] * omega
-  next_v = v + dts[t_i] * a
-
-  return jnp.array([next_pos_x, next_pos_y, next_heading, next_v])
+  # x_next = A * x + B * u
+  return x + jnp.array(
+      [jnp.cos(heading) * v, jnp.sin(heading) * v, omega, a]) * dts[t_i]
 
 
 def plot_result(xs_in, us_in, xs_out, us_out, dts):
@@ -169,10 +160,16 @@ if __name__ == '__main__':
 
   xs_in = jnp.asarray(xs)
   us_in = jnp.asarray(us[:-1])
+  # Potential varying time-steps in seconds
   dts = jnp.ones(len(xs)) * 0.1  # Discrete time-steps in seconds
+  # Cost weights
+  Q = np.diag([10, 10, 20/3, 10/2])
+  R = 0.1 * np.diag([1, 1])
+  assert xs.shape[-1] == Q.shape[0]
+  assert us.shape[-1] == R.shape[0]
   # iLQR optimization
   xs_out, us_out, _, _, _, _, _ = optimizers.ilqr(
-      cost=partial(cost, xs_in, us_in),
+      cost=partial(cost, Q, R, xs_in, us_in),
       dynamics=partial(dynamics, dts),
       x0=xs_in[0],
       U=us_in)
