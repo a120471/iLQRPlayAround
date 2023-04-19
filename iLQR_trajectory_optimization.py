@@ -51,6 +51,8 @@ def angle_wrap(theta):
 def cost(xs_in, us_in, x, u, t_i):
   Q = np.diag([10, 10, 20/3, 10/2])
   R = 0.1 * np.diag([1, 1])
+  assert x.shape[-1] == Q.shape[0]
+  assert u.shape[-1] == R.shape[0]
 
   x_diff = x - xs_in[t_i]
   # wrap heading to [-pi, pi]
@@ -60,7 +62,7 @@ def cost(xs_in, us_in, x, u, t_i):
   return x_diff.T @ Q @ x_diff + u_diff.T @ R @ u_diff
 
 
-def dynamics(x, u, t_i):
+def dynamics(dts, x, u, t_i):
   pos_x = x[0]  # pos_x
   pos_y = x[1]  # pos_y
   heading = x[2]  # heading
@@ -77,15 +79,15 @@ def dynamics(x, u, t_i):
   #      [0, 0],
   #      [0, dt],
   #      [dt, 0]]
-  next_pos_x = pos_x + dt[t_i] * jnp.cos(heading) * v
-  next_pos_y = pos_y + dt[t_i] * jnp.sin(heading) * v
-  next_heading = heading + dt[t_i] * omega
-  next_v = v + dt[t_i] * a
+  next_pos_x = pos_x + dts[t_i] * jnp.cos(heading) * v
+  next_pos_y = pos_y + dts[t_i] * jnp.sin(heading) * v
+  next_heading = heading + dts[t_i] * omega
+  next_v = v + dts[t_i] * a
 
   return jnp.array([next_pos_x, next_pos_y, next_heading, next_v])
 
 
-def plot_result(xs_in, us_in, xs_out, us_out):
+def plot_result(xs_in, us_in, xs_out, us_out, dts):
   xs_calculated_by_us = [[xs_in[0,0], xs_in[0,1]]]
   for i in range(len(us_in)):
     pos_x = xs_calculated_by_us[i][0]
@@ -93,8 +95,8 @@ def plot_result(xs_in, us_in, xs_out, us_out):
     heading = xs_in[i, 2]
     v = xs_in[i, 3]
 
-    next_pos_x = pos_x + dt[i] * np.cos(heading) * v
-    next_pos_y = pos_y + dt[i] * np.sin(heading) * v
+    next_pos_x = pos_x + dts[i] * np.cos(heading) * v
+    next_pos_y = pos_y + dts[i] * np.sin(heading) * v
     xs_calculated_by_us.append([next_pos_x, next_pos_y])
   xs_calculated_by_us = np.array(xs_calculated_by_us)
 
@@ -103,10 +105,10 @@ def plot_result(xs_in, us_in, xs_out, us_out):
   h1 = []
   o1 = []
   for i in range(len(us_in)):
-    v1.append(np.linalg.norm(xs_in[i+1, 0:2] - xs_in[i, 0:2]) / dt[i])
-    a1.append((xs_in[i+1, 3] - xs_in[i, 3]) / dt[i])
+    v1.append(np.linalg.norm(xs_in[i+1, 0:2] - xs_in[i, 0:2]) / dts[i])
+    a1.append((xs_in[i+1, 3] - xs_in[i, 3]) / dts[i])
     h1.append(np.arctan2(xs_in[i+1, 1] - xs_in[i, 1], xs_in[i+1, 0] - xs_in[i, 0]))
-    o1.append((xs_in[i+1, 2] - xs_in[i, 2]) / dt[i])
+    o1.append((xs_in[i+1, 2] - xs_in[i, 2]) / dts[i])
   v1 = np.array(v1)
   a1 = np.array(a1)
   h1 = np.array(h1)
@@ -164,17 +166,16 @@ def plot_result(xs_in, us_in, xs_out, us_out):
 if __name__ == '__main__':
   xs, us = load_trajectory_data('a_noisy_trajectory.json')
   preprocess_flip_heading(xs, us)
-  dt = jnp.ones(len(xs)) * 0.1  # Discrete time-steps in seconds
 
-  # Compile the dynamics.
   xs_in = jnp.asarray(xs)
   us_in = jnp.asarray(us[:-1])
+  dts = jnp.ones(len(xs)) * 0.1  # Discrete time-steps in seconds
   # iLQR optimization
   xs_out, us_out, _, _, _, _, _ = optimizers.ilqr(
       cost=partial(cost, xs_in, us_in),
-      dynamics=dynamics,
+      dynamics=partial(dynamics, dts),
       x0=xs_in[0],
       U=us_in)
 
-  plot_result(xs, us[:-1], xs_out, us_out)
+  plot_result(xs, us[:-1], xs_out, us_out, dts)
   print('Done')
