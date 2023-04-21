@@ -79,76 +79,79 @@ def dynamics(dts, x, u, t_i):
 
 
 def plot_result(xs_in, us_in, xs_out, us_out, dts):
-  xs_calculated_by_us = [[xs_in[0,0], xs_in[0,1]]]
-  for i in range(len(us_in)):
-    pos_x = xs_calculated_by_us[i][0]
-    pos_y = xs_calculated_by_us[i][1]
+  N = len(us_in)
+
+  # pos calculated by pos[0] and origin control
+  xs_ref = [[xs_in[0,0], xs_in[0,1]]]
+  for i in range(N):
+    pos_x = xs_ref[i][0]
+    pos_y = xs_ref[i][1]
     heading = xs_in[i, 2]
     v = xs_in[i, 3]
 
     next_pos_x = pos_x + dts[i] * np.cos(heading) * v
     next_pos_y = pos_y + dts[i] * np.sin(heading) * v
-    xs_calculated_by_us.append([next_pos_x, next_pos_y])
-  xs_calculated_by_us = np.array(xs_calculated_by_us)
+    xs_ref.append([next_pos_x, next_pos_y])
+  xs_ref = np.array(xs_ref)
 
-  v1 = []
-  a1 = []
-  h1 = []
-  o1 = []
-  for i in range(len(us_in)):
-    v1.append(np.linalg.norm(xs_in[i+1, 0:2] - xs_in[i, 0:2]) / dts[i])
-    a1.append((xs_in[i+1, 3] - xs_in[i, 3]) / dts[i])
-    h1.append(np.arctan2(xs_in[i+1, 1] - xs_in[i, 1], xs_in[i+1, 0] - xs_in[i, 0]))
-    o1.append((xs_in[i+1, 2] - xs_in[i, 2]) / dts[i])
-  v1 = np.array(v1)
-  a1 = np.array(a1)
-  h1 = np.array(h1)
-  o1 = np.array(o1)
+  # values from derivative
+  v_deriv = np.linalg.norm(xs_in[1:, 0:2] - xs_in[:-1, 0:2], axis=1) / dts
+  a_deriv = (xs_in[1:, 3] - xs_in[:-1, 3]) / dts
+  h_deriv = (
+      np.arctan2(xs_in[1:, 1] - xs_in[:-1, 1], xs_in[1:, 0] - xs_in[:-1, 0]))
+  o_deriv = (xs_in[1:, 2] - xs_in[:-1, 2]) / dts
 
-  N = len(h1)
-  data_dirs = np.c_[np.cos(h1), np.sin(h1)]
-  data_discontinuous = np.sum(data_dirs[:-1] * data_dirs[1:], axis=1) < 0
+  # flip based on the heading data
+  data_dirs = np.c_[np.cos(h_deriv), np.sin(h_deriv)]
+  discontinuous_flag = np.sum(data_dirs[:-1] * data_dirs[1:], axis=1) < 0
   adj_flip_scalar = np.ones(N)
-  adj_flip_scalar[1:][data_discontinuous] *= -1
+  adj_flip_scalar[1:][discontinuous_flag] *= -1
   flip_scalar = np.cumprod(adj_flip_scalar)
   if np.sum(flip_scalar) < 0:
     flip_scalar *= -1
   need_flip = flip_scalar < 0
-  h1[need_flip] -= np.pi
-  h1[h1 < -np.pi] += np.pi
-  v1[need_flip] *= -1
+  h_deriv[need_flip] = angle_wrap(h_deriv[need_flip] - np.pi)
+  v_deriv[need_flip] *= -1
+  a_deriv[need_flip] *= -1
 
+  from matplotlib import pyplot as plt
   plt.figure()
   plt.subplot(2,3,1)
-  plt.title('origin pos, origin_integrated, optimization result')
-  plt.plot(xs_in[:,0], xs_in[:,1], 'r.-', label='pos_in(m)')
-  plt.plot(xs_out[:,0], xs_out[:,1], 'g.-', label='pos_out')
-  plt.plot(xs_calculated_by_us[:,0], xs_calculated_by_us[:,1], 'y.-', label='pos by using start pos and integrate input control data')
+  plt.title('origin pos, origin integrated, optimization result')
+  plt.plot(xs_in[:,0], xs_in[:,1], 'r.-', label='origin pos(m)')
+  plt.plot(xs_out[:,0], xs_out[:,1], 'g.-', label='output pos')
+  plt.plot(xs_ref[:,0], xs_ref[:,1], 'y.-',
+           label='pos calculated from pos[0] and origin control')
+  plt.axis('equal')
   plt.legend()
+
   plt.subplot(2,3,2)
   plt.title('speed')
-  plt.plot(np.arange(len(xs_in)), xs_in[:,3], 'r', label='speed_in(m/s)')
-  plt.plot(np.arange(len(xs_in)), xs_out[:,3], 'g', label='speed_out')
-  plt.plot(np.arange(len(v1)), v1, 'r:', label='derivative of pos_in')
+  plt.plot(np.arange(N+1), xs_in[:,3], 'r', label='origin speed(m/s)')
+  plt.plot(np.arange(N+1), xs_out[:,3], 'g', label='output speed')
+  plt.plot(np.arange(N), v_deriv, 'r:', label='derivative of origin pos')
   plt.legend()
+
   plt.subplot(2,3,3)
   plt.title('accel')
-  plt.plot(np.arange(len(us_in)), us_in[:,0], 'r', label='accel_in(m/s2)')
-  plt.plot(np.arange(len(us_in)), us_out[:,0], 'g', label='accel_out')
-  plt.plot(np.arange(len(a1)), a1, 'r:', label='derivative of speed_in')
+  plt.plot(np.arange(N), us_in[:,0], 'r', label='origin accel(m/s2)')
+  plt.plot(np.arange(N), us_out[:,0], 'g', label='output accel')
+  plt.plot(np.arange(N), a_deriv, 'r:', label='derivative of origin speed')
   plt.legend()
+
   plt.subplot(2,3,4)
-  plt.title('heading')
-  plt.plot(np.arange(len(xs_in)), xs_in[:,2], 'r', label='heading_in(rad)')
-  plt.plot(np.arange(len(xs_in)), xs_out[:,2], 'g', label='heading_out')
-  plt.plot(np.arange(len(h1)), h1, 'r:', label='derivative of pos_in')
+  plt.title('heading, [-pi, pi]')
+  plt.plot(np.arange(N+1), xs_in[:,2], 'r', label='origin heading(rad)')
+  plt.plot(np.arange(N+1), xs_out[:,2], 'g', label='output heading')
+  plt.plot(np.arange(N), h_deriv, 'r:', label='derivative of origin pos')
   plt.legend()
   plt.ylim(-np.pi, np.pi)
+
   plt.subplot(2,3,5)
   plt.title('omega')
-  plt.plot(np.arange(len(us_in)), us_in[:,1], 'r', label='omega_in(rad/s)')
-  plt.plot(np.arange(len(us_in)), us_out[:,1], 'g', label='omega_out')
-  plt.plot(np.arange(len(o1)), o1, 'r:', label='derivative of heading_in')
+  plt.plot(np.arange(N), us_in[:,1], 'r', label='origin omega(rad/s)')
+  plt.plot(np.arange(N), us_out[:,1], 'g', label='output omega')
+  plt.plot(np.arange(N), o_deriv, 'r:', label='derivative of origin heading')
   plt.legend()
   plt.ylim(-np.pi, np.pi)
   plt.show()
@@ -156,12 +159,13 @@ def plot_result(xs_in, us_in, xs_out, us_out, dts):
 
 if __name__ == '__main__':
   xs, us = load_trajectory_data('a_noisy_trajectory.json')
+  assert len(xs) > 1
   preprocess_flip_heading(xs, us)
 
   xs_in = jnp.asarray(xs)
   us_in = jnp.asarray(us[:-1])
   # Potential varying time-steps in seconds
-  dts = jnp.ones(len(xs)) * 0.1  # Discrete time-steps in seconds
+  dts = jnp.ones(len(us_in)) * 0.1  # Discrete time-steps in seconds
   # Cost weights
   Q = np.diag([10, 10, 20/3, 10/2])
   R = 0.1 * np.diag([1, 1])
@@ -174,5 +178,5 @@ if __name__ == '__main__':
       x0=xs_in[0],
       U=us_in)
 
-  plot_result(xs, us[:-1], xs_out, us_out, dts)
+  plot_result(xs, us[:-1], xs_out, us_out, np.asarray(dts))
   print('Done')
