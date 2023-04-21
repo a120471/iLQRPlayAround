@@ -1,5 +1,4 @@
 Trajectory optimization code using iLQR algorithm from this library:
   https://github.com/google/trajax
-
-Note that the following image was a result created using a previous commit code.
-![Figure_1](https://user-images.githubusercontent.com/4888418/232206321-720931fb-3d57-4e03-88f1-6c681bec4a41.png)
+  
+![image](https://user-images.githubusercontent.com/4888418/233631116-e9735d01-f31a-4fb6-847b-8908e5bfff35.png)
